@@ -1,0 +1,4 @@
+/* Aplica margen superior negativo a todos los elementos con clase 'box' */
+.box {
+  margin-top: -20px;  /* Ajusta este valor según sea necesario */
+}

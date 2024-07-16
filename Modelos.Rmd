@@ -1,0 +1,251 @@
+---
+title: "Modelos"
+output: html_notebook
+---
+
+```{r}
+# Instalar y cargar las librerías necesarias
+if (!require(readr)) install.packages("readr", dependencies = TRUE)
+if (!require(dplyr)) install.packages("dplyr", dependencies = TRUE)
+if (!require(ggplot2)) install.packages("ggplot2", dependencies = TRUE)
+if (!require(rpart)) install.packages("rpart", dependencies = TRUE)
+if (!require(rpart.plot)) install.packages("rpart.plot", dependencies = TRUE)
+if (!require(grid)) install.packages("grid", dependencies = TRUE)
+if (!require(png)) install.packages("png", dependencies = TRUE)
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(grid)
+library(png)
+
+```
+
+
+# SEGMENTACIÓN DE CLIENTES
+```{r}
+datos <- read.csv("Churn_Modelling_Process.csv")
+datos_segmentacion <- datos 
+datos_segmentacion$Geography <- as.numeric(factor(datos_segmentacion$Geography, levels = unique(datos_segmentacion$Geography)))
+datos_segmentacion$Gender <- as.numeric(factor(datos_segmentacion$Gender, levels = unique(datos_segmentacion$Gender)))
+datos_segmentacion
+```
+
+```{r}
+# Calcular la suma de cuadrados dentro de los clusters para diferentes números de clusters (k)
+set.seed(123)
+wss <- c()
+for (i in 1:10) {
+  kmeans_model <- kmeans(datos_segmentacion, centers = i)
+  wss[i] <- kmeans_model$tot.withinss
+}
+
+# Gráfico del método del codo
+png("www/metodo_del_codo.png", width = 800, height = 600, units = "px")
+plot(1:10, wss, type = "b", pch = 19, frame = FALSE,
+     xlab = "Número de clusters (k)", ylab = "Suma de cuadrados dentro de los clusters",
+     main = "Método del Codo para determinar k")
+lines(1:10, wss, type = "b", pch = 19)
+```
+
+```{r}
+# Cargar la imagen del método del codo desde el archivo PNG
+metodo_del_codo_img <- png::readPNG("www/metodo_del_codo.png")
+
+# Convertir la imagen a un objeto gráfico para visualización
+img_grob <- grid::rasterGrob(metodo_del_codo_img, interpolate = TRUE)
+
+# Mostrar la imagen en la sesión de R
+grid::grid.newpage()
+grid::grid.draw(img_grob)
+```
+
+
+```{r}
+# Aplicar k-means con el número fijo de clusters
+set.seed(23)
+kmeans_model <- kmeans(datos_segmentacion, centers = 4)
+# Guardar el modelo utilizando saveRDS
+saveRDS(kmeans_model, file = "modelo_kmeans.rds")
+```
+
+```{r}
+# Obtener las asignaciones de clusters para cada observación
+cluster_asignado <- kmeans_model$cluster
+
+# Agregar los resultados de segmentación como una columna extra a datos_segmentacion
+datos_segmentacion_con_clusters <- datos_segmentacion %>%
+  mutate(Cluster = cluster_asignado)
+# Guardar datos_segmentacion_con_clusters como datas_segmentados.csv
+write.csv(datos_segmentacion_con_clusters, file = "datos_segmentacion.csv", row.names = FALSE)
+
+
+# Ver los primeros registros de datos_segmentacion_con_clusters
+head(datos_segmentacion_con_clusters)
+```
+
+```{r}
+# Contar el número de churn y no churn por segmento, y calcular el porcentaje de churn
+tabla_churn_por_segmento <- datos_segmentacion_con_clusters %>%
+  group_by(Cluster) %>%
+  summarise(Churn = sum(Exited == 1),
+            No_Churn = sum(Exited == 0),
+            Porcentaje_Churn = (Churn / n()) * 100) %>%
+  arrange(desc(Churn))
+
+# Mostrar la tabla ordenada
+print(tabla_churn_por_segmento)
+```
+
+
+
+
+# PREDICCIÓN CHURN
+```{r}
+# Instalar y cargar las librerías necesarias
+if (!require(rpart)) install.packages("rpart", dependencies = TRUE)
+if (!require(ggplot2)) install.packages("ggplot2", dependencies = TRUE)
+if (!require(rpart.plot)) install.packages("rpart.plot", dependencies = TRUE)
+
+library(rpart)
+library(ggplot2)
+library(rpart.plot)
+
+# Cargar los datos (ajustar la ruta al archivo CSV)
+datos <- read.csv("datos_segmentacion.csv")
+
+# Definir las variables predictoras y la variable objetivo
+variables_predictoras <- c("CreditScore", "Geography", "Gender", "Age", "Tenure", 
+                           "NumOfProducts", "HasCrCard", "IsActiveMember")
+variable_objetivo <- "Exited"
+
+# Subconjunto de datos con variables predictoras y objetivo
+datos_subconjunto <- datos[, c(variables_predictoras, variable_objetivo)]
+
+# Dividir los datos en entrenamiento (70%) y prueba (30%)
+set.seed(123)
+indices <- sample(1:nrow(datos_subconjunto))
+n_entrenamiento <- round(0.7 * nrow(datos_subconjunto))
+
+datos_entrenamiento <- datos_subconjunto[indices[1:n_entrenamiento], ]
+datos_prueba <- datos_subconjunto[indices[(n_entrenamiento + 1):nrow(datos_subconjunto)], ]
+
+# Definir función para calcular la matriz de confusión
+calcular_matriz_confusion <- function(actual, predicciones) {
+  matriz <- table(Actual = actual, Prediccion = predicciones)
+  return(matriz)
+}
+
+# Configurar k-fold para validación cruzada
+k <- 5
+n <- nrow(datos_entrenamiento)
+particiones <- cut(1:n, breaks = k, labels = FALSE)
+
+# Inicializar vectores para almacenar resultados
+precisiones <- rep(0, k)
+matrices_confusion <- list()
+
+# Realizar validación cruzada k-fold
+for (i in 1:k) {
+  # Subset de datos de entrenamiento y validación para esta iteración
+  datos_entrenamiento_cv <- datos_entrenamiento[particiones != i, ]
+  datos_validacion_cv <- datos_entrenamiento[particiones == i, ]
+  
+  # Entrenar modelo de árbol de decisión
+  modelo <- rpart(Exited ~ ., data = datos_entrenamiento_cv, method = "class")
+  
+  # Hacer predicciones en datos de validación
+  predicciones <- predict(modelo, newdata = datos_validacion_cv, type = "class")
+  
+  # Calcular métricas
+  precision <- sum(predicciones == datos_validacion_cv$Exited) / length(predicciones)
+  precisiones[i] <- precision
+  
+  # Calcular y almacenar matriz de confusión
+  matriz <- calcular_matriz_confusion(datos_validacion_cv$Exited, predicciones)
+  matrices_confusion[[i]] <- matriz
+}
+
+# Calcular y mostrar resultados promedio de validación cruzada
+precision_promedio <- mean(precisiones)
+cat("Precisión promedio de validación cruzada:", precision_promedio, "\n")
+
+# Calcular y mostrar matriz de confusión promedio
+matriz_promedio <- Reduce(`+`, matrices_confusion)
+cat("\nMatriz de Confusión Promedio:\n")
+print(matriz_promedio)
+
+# Entrenar el modelo final con todos los datos de entrenamiento
+modelo_final <- rpart(Exited ~ ., data = datos_entrenamiento, method = "class")
+
+# Hacer predicciones en el conjunto de prueba
+predicciones_prueba <- predict(modelo_final, newdata = datos_prueba, type = "class")
+
+# Calcular y mostrar la matriz de confusión en el conjunto de prueba
+matriz_confusion_prueba <- calcular_matriz_confusion(datos_prueba$Exited, predicciones_prueba)
+cat("\nMatriz de Confusión en el Conjunto de Prueba:\n")
+print(matriz_confusion_prueba)
+
+# Guardar el modelo entrenado
+saveRDS(modelo_final, file = "modelo_arbol_decision_v1.rds")
+
+# Función para crear la matriz de confusión visual
+crear_matriz_confusion_visual <- function(matriz_confusion) {
+  # Convertir la matriz de confusión a un data frame
+  matriz_df <- as.data.frame(matriz_confusion)
+  
+  # Crear un gráfico de ggplot2
+  ggplot(matriz_df, aes(x = Prediccion, y = Actual, fill = Freq)) +
+    geom_tile(color = "white") +
+    geom_text(aes(label = Freq), vjust = 1, size = 10) +
+    labs(title = "Matriz de Confusión",
+         x = "Predicción",
+         y = "Realidad") +
+    theme_minimal() +
+    scale_fill_gradient(low = "white", high = "blue") +
+    theme(axis.text.x = element_text(size = 14, angle = 0, hjust = 0.5),  # Ajustar tamaño y ángulo de los números en el eje x
+          axis.text.y = element_text(size = 14),  # Ajustar tamaño de los números en el eje y
+          plot.title = element_text(size = 18, face = "bold"),
+          axis.title.x = element_text(size = 14),  # Ajustar tamaño del título del eje x
+          axis.title.y = element_text(size = 14),  # Ajustar tamaño y estilo de la etiqueta del título
+          legend.text = element_text(size = 12),  # Ajustar tamaño de la leyenda
+          legend.title = element_text(size = 14, face = "bold"))
+}
+
+# Mostrar la matriz de confusión visualmente bonita
+plot_confusion_matrix <- crear_matriz_confusion_visual(matriz_confusion_prueba)
+print(plot_confusion_matrix)
+
+# Calcular la precisión del modelo
+precision <- sum(diag(matriz_confusion_prueba)) / sum(matriz_confusion_prueba)
+cat("\nPrecisión del modelo:", precision, "\n")
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+rpart.plot(modelo)
+```
+
+```{r}
+# Obtener la importancia de las variables
+importancia_variables <- modelo$variable.importance
+
+# Mostrar la importancia de las variables
+cat("Importancia de las variables predictoras:\n")
+print(importancia_variables)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
